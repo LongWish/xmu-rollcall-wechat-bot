@@ -1,8 +1,6 @@
-# XMU 微信签到机器人懒人包
+# XMU 微信签到机器人
 
-这个仓库现在只保留微信机器人主线，目标就是一件事：
-
-- 让你把 XMU TronClass 自动签到做成一个微信机器人
+[使用效果图](docs/screenshot.jpg)
 
 机器人支持这些微信命令：
 
@@ -18,10 +16,14 @@
 
 ## 三步上手
 
+### 0. 服务器
+
+租用一个 Linux 服务器（推荐 Ubuntu 22.04），可以选择阿里云、腾讯云、Google Cloud 等。
+
 ### 1. 初始化
 
 ```bash
-git clone <你的仓库地址>
+git clone https://github.com/KrsMt-0113/xmu-rollcall-wechat-bot.git
 cd xmu-rollcall-helper
 bash scripts/bootstrap.sh
 ```
@@ -65,17 +67,6 @@ sudo journalctl -u xmu-wechatbot -f
 - [scripts/bootstrap.sh](scripts/bootstrap.sh)：一键建虚拟环境并安装
 - [scripts/start-local.sh](scripts/start-local.sh)：本地启动或首次扫码
 - [scripts/install-systemd.sh](scripts/install-systemd.sh)：一键安装 `systemd`
-- [pfp.jpg](pfp.jpg)：机器人微信号头像素材
-
-## 机器人头像
-
-机器人头像不是 SDK 里设置的，而是“登录这个机器人的微信号本身的头像”。
-
-做法很简单：
-
-1. 用手机或 PC 微信登录机器人微信号
-2. 把 [pfp.jpg](pfp.jpg) 设置成头像
-3. 再给机器人扫码登录
 
 ## 目录说明
 
