@@ -47,6 +47,7 @@ def _ensure_user(config: Dict[str, Any], user_id: str) -> Dict[str, Any]:
             "context_token": "",
             "cron": None,
             "cron_jobs": [],
+            "watch": None,
         },
     )
     user_config.setdefault("accounts", [])
@@ -54,6 +55,7 @@ def _ensure_user(config: Dict[str, Any], user_id: str) -> Dict[str, Any]:
     user_config.setdefault("context_token", "")
     user_config.setdefault("cron", None)
     user_config.setdefault("cron_jobs", [])
+    user_config.setdefault("watch", None)
     return user_config
 
 
@@ -272,6 +274,71 @@ def list_user_cron_jobs() -> List[Dict[str, Any]]:
                     "cron": dict(cron),
                 }
             )
+    return jobs
+
+
+def get_user_watch(user_id: str) -> Optional[Dict[str, Any]]:
+    config = load_wechat_bot_config()
+    user_config = _ensure_user(config, user_id)
+    watch = user_config.get("watch")
+    if not isinstance(watch, dict) or not watch.get("enabled"):
+        return None
+    try:
+        interval_seconds = int(watch.get("interval_seconds", 0))
+    except (TypeError, ValueError):
+        return None
+    if interval_seconds <= 0:
+        return None
+    return {
+        "enabled": True,
+        "interval_seconds": interval_seconds,
+    }
+
+
+def set_user_watch(user_id: str, interval_seconds: int) -> Dict[str, Any]:
+    config = load_wechat_bot_config()
+    user_config = _ensure_user(config, user_id)
+    watch = {
+        "enabled": True,
+        "interval_seconds": int(interval_seconds),
+    }
+    user_config["watch"] = watch
+    save_wechat_bot_config(config)
+    return dict(watch)
+
+
+def clear_user_watch(user_id: str) -> bool:
+    config = load_wechat_bot_config()
+    user_config = _ensure_user(config, user_id)
+    had_watch = isinstance(user_config.get("watch"), dict) and bool(user_config["watch"].get("enabled"))
+    user_config["watch"] = None
+    save_wechat_bot_config(config)
+    return had_watch
+
+
+def list_user_watch_jobs() -> List[Dict[str, Any]]:
+    config = load_wechat_bot_config()
+    jobs: List[Dict[str, Any]] = []
+    for user_id, user_config in config.get("users", {}).items():
+        watch = user_config.get("watch")
+        if not isinstance(watch, dict) or not watch.get("enabled"):
+            continue
+        try:
+            interval_seconds = int(watch.get("interval_seconds", 0))
+        except (TypeError, ValueError):
+            continue
+        if interval_seconds <= 0:
+            continue
+        jobs.append(
+            {
+                "user_id": user_id,
+                "context_token": str(user_config.get("context_token") or ""),
+                "watch": {
+                    "enabled": True,
+                    "interval_seconds": interval_seconds,
+                },
+            }
+        )
     return jobs
 
 

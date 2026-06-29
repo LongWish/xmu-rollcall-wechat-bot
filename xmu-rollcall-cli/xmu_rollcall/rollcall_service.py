@@ -226,6 +226,80 @@ class RollcallService:
             outcomes=outcomes,
         )
 
+    def inspect_active_rollcalls(self) -> AnswerBatchResult:
+        session = self.get_session()
+        rollcalls = self.fetch_rollcalls(session=session)
+        outcomes = [self.inspect_rollcall(session, rollcall) for rollcall in rollcalls]
+        return AnswerBatchResult(
+            account=self.account,
+            queried_at=datetime.now(CHINA_TZ),
+            rollcalls=rollcalls,
+            outcomes=outcomes,
+        )
+
+    def inspect_rollcall(self, session: requests.Session, rollcall: RollcallRecord) -> AnswerOutcome:
+        if rollcall.is_expired:
+            return AnswerOutcome(
+                rollcall=rollcall,
+                action="expired",
+                success=False,
+                message="Rollcall expired.",
+            )
+
+        if rollcall.status == "on_call_fine":
+            return AnswerOutcome(
+                rollcall=rollcall,
+                action="already_answered",
+                success=True,
+                message="Rollcall already answered.",
+            )
+
+        if rollcall.is_number:
+            number_code = self.fetch_number_code(session, rollcall)
+            if number_code:
+                return AnswerOutcome(
+                    rollcall=rollcall,
+                    action="detected",
+                    success=True,
+                    message="Number rollcall detected.",
+                    number_code=number_code,
+                )
+            return AnswerOutcome(
+                rollcall=rollcall,
+                action="detected",
+                success=False,
+                message="Number rollcall detected, but number_code was not found.",
+            )
+
+        if rollcall.is_radar:
+            return AnswerOutcome(
+                rollcall=rollcall,
+                action="detected",
+                success=True,
+                message="Radar rollcall detected.",
+            )
+
+        return AnswerOutcome(
+            rollcall=rollcall,
+            action="detected",
+            success=True,
+            message="QR code or unsupported rollcall detected.",
+        )
+
+    def fetch_number_code(
+        self,
+        session: requests.Session,
+        rollcall: RollcallRecord,
+    ) -> Optional[str]:
+        code_url = f"{BASE_URL}/api/rollcall/{rollcall.rollcall_id}/student_rollcalls"
+        try:
+            code_response = session.get(code_url, headers=session.headers, timeout=15)
+        except requests.RequestException:
+            return None
+        if code_response.status_code != 200:
+            return None
+        return find_number_code(_safe_json(code_response))
+
     def answer_rollcall(self, session: requests.Session, rollcall: RollcallRecord) -> AnswerOutcome:
         if rollcall.is_expired:
             return AnswerOutcome(

@@ -6,6 +6,7 @@ import os
 import re
 import shlex
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Union
@@ -23,11 +24,15 @@ from .wechat_storage import (
     get_current_user_account,
     get_user_cron_schedules,
     get_user_accounts,
+    get_user_watch,
     list_user_cron_jobs,
+    list_user_watch_jobs,
     load_all_user_context_tokens,
     mark_user_cron_triggered,
     save_user_context_token,
     set_current_user_account,
+    set_user_watch,
+    clear_user_watch,
 )
 
 MAX_LINES_PER_MESSAGE = 12
@@ -37,6 +42,8 @@ DETAIL_BLOCKS_PER_MESSAGE = 2
 CRON_ROWS_PER_MESSAGE = 4
 CRON_POLL_INTERVAL_SECONDS = 20
 CRON_GRACE_SECONDS = 300
+WATCH_POLL_INTERVAL_SECONDS = 5
+WATCH_MIN_INTERVAL_SECONDS = 30
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 CRON_TIME_PATTERN = re.compile(r"^(\d{1,2}):(\d{2})$")
 
@@ -520,6 +527,78 @@ def _format_cron_cleared_markdown(cleared_count: int) -> str:
     )
 
 
+def _format_watch_status_markdown(watch: Optional[dict]) -> str:
+    if not watch:
+        return "\n".join(
+            [
+                "# Watch",
+                "",
+                _build_table(
+                    ["Status", "Command"],
+                    [["off", "`/watch 120`"]],
+                ),
+                "",
+                "> Watch mode only sends reminders and does not submit answers.",
+            ]
+        )
+    interval_seconds = int(watch.get("interval_seconds", 0))
+    return "\n".join(
+        [
+            "# Watch",
+            "",
+            _build_table(
+                ["Status", "Interval"],
+                [["on", f"`{interval_seconds}` seconds"]],
+            ),
+            "",
+            "> Use `/watch off` to stop.",
+        ]
+    )
+
+
+def _format_watch_set_markdown(watch: dict) -> str:
+    interval_seconds = int(watch.get("interval_seconds", 0))
+    return "\n".join(
+        [
+            "# Watch enabled",
+            "",
+            _build_table(
+                ["Interval", "Mode"],
+                [[f"`{interval_seconds}` seconds", "notify only"]],
+            ),
+            "",
+            "> The bot will check active rollcalls at this interval and send reminders only.",
+        ]
+    )
+
+
+def _format_watch_off_markdown(removed: bool) -> str:
+    status = "stopped" if removed else "already off"
+    return "\n".join(
+        [
+            "# Watch",
+            "",
+            _build_table(
+                ["Status"],
+                [[status]],
+            ),
+        ]
+    )
+
+
+def _format_watch_run_markdown(interval_seconds: int, executed_at: datetime) -> str:
+    return "\n".join(
+        [
+            "# Watch check",
+            "",
+            _build_table(
+                ["Interval", "Checked at"],
+                [[f"`{interval_seconds}` seconds", f"`{_compact_time(_format_datetime(executed_at))}`"]],
+            ),
+        ]
+    )
+
+
 def _format_cron_run_markdown(schedule: dict, executed_at: datetime) -> str:
     return "\n".join(
         [
@@ -634,12 +713,44 @@ def _format_error_markdown(title: str, message: str) -> str:
     )
 
 
+def _format_help_markdown() -> str:
+    return "\n".join(
+        [
+            "# Commands",
+            "",
+            _build_table(
+                ["Command", "Description"],
+                [
+                    ["`/conf`", "Configure an account step by step"],
+                    ["`/switch 1`", "Switch account"],
+                    ["`/accounts`", "List accounts"],
+                    ["`/answer`", "Run one answer check"],
+                    ["`/watch 120`", "Check every 120 seconds and send reminders only"],
+                    ["`/watch status`", "Show watch status"],
+                    ["`/watch off`", "Stop watch"],
+                    ["`/cron add 4 8:00`", "Add scheduled answer check"],
+                    ["`/cron del 2`", "Delete scheduled job"],
+                    ["`/cron off`", "Clear scheduled jobs"],
+                    ["`/refresh`", "Clear login cache"],
+                    ["`/cancel`", "Cancel `/conf`"],
+                ],
+            ),
+            "",
+            "> `/watch` only detects active rollcalls and sends reminders. It does not submit answers.",
+            f"> Minimum watch interval: `{WATCH_MIN_INTERVAL_SECONDS}` seconds.",
+        ]
+    )
+
+
 class XMUWeChatBotApp:
     def __init__(self, bot: Any):
         self.bot = bot
         self.command_lock = asyncio.Lock()
         self.pending_configs: Dict[str, PendingConfigState] = {}
         self.cron_task: Optional[asyncio.Task[None]] = None
+        self.watch_task: Optional[asyncio.Task[None]] = None
+        self.watch_last_run: Dict[str, float] = {}
+        self.watch_notified_rollcalls: Dict[str, set[int]] = {}
 
     def restore_context_tokens(self) -> None:
         context_tokens = getattr(self.bot, "_context_tokens", None)
@@ -651,16 +762,26 @@ class XMUWeChatBotApp:
         self.restore_context_tokens()
         if self.cron_task is None:
             self.cron_task = asyncio.create_task(self._cron_loop())
+        if self.watch_task is None:
+            self.watch_task = asyncio.create_task(self._watch_loop())
 
     async def stop_background_tasks(self) -> None:
         if self.cron_task is None:
-            return
-        self.cron_task.cancel()
-        try:
-            await self.cron_task
-        except asyncio.CancelledError:
             pass
-        self.cron_task = None
+        else:
+            self.cron_task.cancel()
+            try:
+                await self.cron_task
+            except asyncio.CancelledError:
+                pass
+            self.cron_task = None
+        if self.watch_task is not None:
+            self.watch_task.cancel()
+            try:
+                await self.watch_task
+            except asyncio.CancelledError:
+                pass
+            self.watch_task = None
 
     async def handle_message(self, msg: Any) -> None:
         text = (getattr(msg, "text", "") or "").strip()
@@ -730,6 +851,8 @@ class XMUWeChatBotApp:
             return await self._handle_switch(msg.user_id, parts)
         if command == "/answer":
             return await self._handle_answer(msg.user_id)
+        if command == "/watch":
+            return await self._handle_watch(msg.user_id, parts)
         if command == "/cron":
             return await self._handle_cron(msg.user_id, parts)
         if command == "/refresh":
@@ -833,6 +956,40 @@ class XMUWeChatBotApp:
             return _format_no_rollcall_markdown(account, queried_at)
         return _format_answer_messages(batch_result)
 
+    async def _handle_watch(self, user_id: str, parts: Sequence[str]) -> ReplyPayload:
+        if len(parts) == 1 or (len(parts) == 2 and parts[1].lower() in {"status", "show"}):
+            watch = await asyncio.to_thread(get_user_watch, user_id)
+            return _format_watch_status_markdown(watch)
+
+        if len(parts) == 2 and parts[1].lower() in {"off", "stop", "disable", "clear"}:
+            removed = await asyncio.to_thread(clear_user_watch, user_id)
+            self.watch_last_run.pop(user_id, None)
+            self.watch_notified_rollcalls.pop(user_id, None)
+            return _format_watch_off_markdown(removed)
+
+        if len(parts) != 2:
+            return _format_error_markdown("Watch usage", "Use `/watch 120`, `/watch status`, or `/watch off`.")
+
+        try:
+            interval_seconds = int(parts[1])
+        except ValueError:
+            return _format_error_markdown("Watch usage", "Interval must be seconds, for example `/watch 120`.")
+
+        if interval_seconds < WATCH_MIN_INTERVAL_SECONDS:
+            return _format_error_markdown(
+                "Watch interval too small",
+                f"Use at least {WATCH_MIN_INTERVAL_SECONDS} seconds.",
+            )
+
+        account = await asyncio.to_thread(get_current_user_account, user_id)
+        if not account:
+            return _format_no_account_markdown()
+
+        watch = await asyncio.to_thread(set_user_watch, user_id, interval_seconds)
+        self.watch_last_run.pop(user_id, None)
+        self.watch_notified_rollcalls.pop(user_id, None)
+        return _format_watch_set_markdown(watch)
+
     async def _handle_cron(self, user_id: str, parts: Sequence[str]) -> ReplyPayload:
         if len(parts) == 1:
             schedules = await asyncio.to_thread(get_user_cron_schedules, user_id)
@@ -908,6 +1065,89 @@ class XMUWeChatBotApp:
             except Exception as exc:
                 print(f"[wechatbot] 定时任务异常：{exc}", file=sys.stderr, flush=True)
             await asyncio.sleep(CRON_POLL_INTERVAL_SECONDS)
+
+    async def _watch_loop(self) -> None:
+        while True:
+            try:
+                await self._run_due_watches()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(f"[wechatbot] watch loop error: {exc}", file=sys.stderr, flush=True)
+            await asyncio.sleep(WATCH_POLL_INTERVAL_SECONDS)
+
+    async def _run_due_watches(self) -> None:
+        now = time.time()
+        jobs = await asyncio.to_thread(list_user_watch_jobs)
+        for job in jobs:
+            user_id = str(job.get("user_id") or "")
+            watch = job.get("watch") or {}
+            if not user_id:
+                continue
+            try:
+                interval_seconds = int(watch.get("interval_seconds", 0))
+            except (TypeError, ValueError):
+                continue
+            if interval_seconds < WATCH_MIN_INTERVAL_SECONDS:
+                continue
+            last_run = self.watch_last_run.get(user_id, 0.0)
+            if now - last_run < interval_seconds:
+                continue
+            self.watch_last_run[user_id] = now
+            await self._execute_watch(user_id, interval_seconds)
+
+    async def _execute_watch(self, user_id: str, interval_seconds: int) -> None:
+        async with self.command_lock:
+            account = await asyncio.to_thread(get_current_user_account, user_id)
+            if not account:
+                return
+            try:
+                cache_key = build_user_session_cache_key(user_id, int(account["id"]))
+                service = RollcallService(account, session_cache_key=cache_key)
+                batch_result = await asyncio.to_thread(service.inspect_active_rollcalls)
+            except Exception as exc:
+                await self._send_user_messages(
+                    user_id,
+                    [
+                        _format_watch_run_markdown(interval_seconds, _china_now()),
+                        _format_error_markdown("Watch check failed", str(exc)),
+                    ],
+                )
+                return
+
+            if not batch_result.rollcalls:
+                return
+
+            seen = self.watch_notified_rollcalls.setdefault(user_id, set())
+            fresh_rollcalls = []
+            fresh_outcomes = []
+            for rollcall, outcome in zip(batch_result.rollcalls, batch_result.outcomes):
+                rollcall_id = int(rollcall.rollcall_id)
+                if rollcall_id in seen:
+                    continue
+                if outcome.action in {"expired", "already_answered"}:
+                    seen.add(rollcall_id)
+                    continue
+                seen.add(rollcall_id)
+                fresh_rollcalls.append(rollcall)
+                fresh_outcomes.append(outcome)
+
+            if not fresh_rollcalls:
+                return
+
+            filtered_result = AnswerBatchResult(
+                account=batch_result.account,
+                queried_at=batch_result.queried_at,
+                rollcalls=fresh_rollcalls,
+                outcomes=fresh_outcomes,
+            )
+            await self._send_user_messages(
+                user_id,
+                [
+                    _format_watch_run_markdown(interval_seconds, filtered_result.queried_at),
+                    *_format_answer_messages(filtered_result),
+                ],
+            )
 
     async def _run_due_crons(self) -> None:
         now = _china_now()
