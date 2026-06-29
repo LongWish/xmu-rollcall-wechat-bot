@@ -2,6 +2,21 @@
 
 [使用效果图](docs/screenshot.jpg)
 
+## Android 客户端
+
+仓库包含一个原生 Android 客户端：[xmu-rollcall-android](xmu-rollcall-android)。
+
+Android 版用于在手机本地完成“后台轮询提醒 + 用户主动一键签到”的流程：
+
+- 后台守护会定时轮询 TronClass 签到。
+- 默认检测到新签到后只发送系统通知，不会直接提交。
+- 用户点击通知进入 App 后，可点击“一键签到”按类型处理数字签到和雷达签到。
+- 二维码签到当前不支持自动提交。
+
+更多说明见 [xmu-rollcall-android/README.md](xmu-rollcall-android/README.md)。
+
+## 微信机器人
+
 机器人支持这些微信命令：
 
 - `/conf`：分步配置账号
