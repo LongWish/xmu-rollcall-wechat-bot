@@ -24,6 +24,12 @@ data class RollcallRecord(
     val scored: Boolean,
     val status: String
 ) {
+    val isAnswered: Boolean
+        get() = status == "on_call_fine" || rollcall_status == "on_call_fine"
+
+    val isActive: Boolean
+        get() = !is_expired && !isAnswered
+
     val typeLabel: String
         get() = when {
             is_radar -> "雷达签到"
@@ -141,17 +147,17 @@ class RollcallService(
         val outcomes = rollcalls.map { rollcall ->
             when {
                 rollcall.is_expired -> AnswerOutcome(rollcall, "expired", false, "签到已过期。")
-                rollcall.rollcall_status == "on_call_fine" -> AnswerOutcome(rollcall, "already_answered", true, "签到已完成。")
+                rollcall.isAnswered -> AnswerOutcome(rollcall, "already_answered", true, "签到已完成。")
                 rollcall.is_number -> {
                     val code = fetchNumberCode(rollcall)
                     if (code != null) {
-                        AnswerOutcome(rollcall, "detected", true, "检测到数字签到码：$code", numberCode = code)
+                        AnswerOutcome(rollcall, "detected", false, "检测到数字签到码：$code", numberCode = code)
                     } else {
                         AnswerOutcome(rollcall, "detected", false, "检测到数字签到，但未获取到签到码。")
                     }
                 }
-                rollcall.is_radar -> AnswerOutcome(rollcall, "detected", true, "检测到雷达签到，需一键自动应答。")
-                else -> AnswerOutcome(rollcall, "detected", true, "二维码或暂不支持的签到类型。")
+                rollcall.is_radar -> AnswerOutcome(rollcall, "detected", false, "检测到雷达签到，需一键自动应答。")
+                else -> AnswerOutcome(rollcall, "detected", false, "二维码或暂不支持的签到类型。")
             }
         }
         return AnswerBatchResult(username, Date(), rollcalls, outcomes)
@@ -166,11 +172,11 @@ class RollcallService(
         return AnswerBatchResult(username, Date(), rollcalls, outcomes)
     }
 
-    private fun answerRollcall(rollcall: RollcallRecord): AnswerOutcome {
+    fun answerRollcall(rollcall: RollcallRecord): AnswerOutcome {
         if (rollcall.is_expired) {
             return AnswerOutcome(rollcall, "expired", false, "该签到已过期。")
         }
-        if (rollcall.rollcall_status == "on_call_fine") {
+        if (rollcall.isAnswered) {
             return AnswerOutcome(rollcall, "already_answered", true, "该签到已完成。")
         }
         if (rollcall.is_radar) {
@@ -220,7 +226,18 @@ class RollcallService(
         return try {
             loginClient.okHttpClient.newCall(request).execute().use { response ->
                 if (response.code == 200) {
-                    AnswerOutcome(rollcall, "answered", true, "数字签到成功。", numberCode = numberCode, responseStatus = 200)
+                    if (confirmRollcallAnswered(rollcall.rollcall_id)) {
+                        AnswerOutcome(rollcall, "answered", true, "数字签到成功。", numberCode = numberCode, responseStatus = 200)
+                    } else {
+                        AnswerOutcome(
+                            rollcall,
+                            "pending_confirmation",
+                            false,
+                            "提交接口返回 200，但复查未确认完成，请手动核对。",
+                            numberCode = numberCode,
+                            responseStatus = 200
+                        )
+                    }
                 } else {
                     AnswerOutcome(rollcall, "failed", false, "提交数字签到失败，HTTP ${response.code}", numberCode = numberCode, responseStatus = response.code)
                 }
@@ -251,7 +268,11 @@ class RollcallService(
                 loginClient.okHttpClient.newCall(request).execute().use { response ->
                     lastStatus = response.code
                     if (response.code == 200) {
-                        return AnswerOutcome(rollcall, "answered", true, "雷达签到成功（探测点直达）。", latitude = lat, longitude = lon, responseStatus = 200)
+                        return if (confirmRollcallAnswered(rollcall.rollcall_id)) {
+                            AnswerOutcome(rollcall, "answered", true, "雷达签到成功（探测点直达）。", latitude = lat, longitude = lon, responseStatus = 200)
+                        } else {
+                            AnswerOutcome(rollcall, "pending_confirmation", false, "提交接口返回 200，但复查未确认完成，请手动核对。", latitude = lat, longitude = lon, responseStatus = 200)
+                        }
                     }
                     val bodyString = response.body?.string() ?: ""
                     val resultObj = gson.fromJson(bodyString, JsonObject::class.java)
@@ -291,7 +312,11 @@ class RollcallService(
                 loginClient.okHttpClient.newCall(request).execute().use { response ->
                     lastStatus = response.code
                     if (response.code == 200) {
-                        return AnswerOutcome(rollcall, "answered", true, "雷达定位签到成功。", latitude = lat, longitude = lon, responseStatus = 200)
+                        return if (confirmRollcallAnswered(rollcall.rollcall_id)) {
+                            AnswerOutcome(rollcall, "answered", true, "雷达定位签到成功。", latitude = lat, longitude = lon, responseStatus = 200)
+                        } else {
+                            AnswerOutcome(rollcall, "pending_confirmation", false, "提交接口返回 200，但复查未确认完成，请手动核对。", latitude = lat, longitude = lon, responseStatus = 200)
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -300,6 +325,23 @@ class RollcallService(
         }
 
         return AnswerOutcome(rollcall, "failed", false, "雷达签到失败，坐标提交未获通过，HTTP $lastStatus", responseStatus = lastStatus)
+    }
+
+    private fun confirmRollcallAnswered(rollcallId: Int): Boolean {
+        repeat(3) { attempt ->
+            if (attempt > 0) {
+                Thread.sleep(800L)
+            }
+            val latest = try {
+                fetchRollcalls().firstOrNull { it.rollcall_id == rollcallId }
+            } catch (e: Exception) {
+                null
+            }
+            if (latest?.isAnswered == true) {
+                return true
+            }
+        }
+        return false
     }
 
     private fun buildRadarPayload(latitude: Double, longitude: Double): Map<String, Any?> {

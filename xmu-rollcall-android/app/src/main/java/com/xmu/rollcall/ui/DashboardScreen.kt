@@ -81,6 +81,10 @@ fun DashboardScreen(accountStore: AccountStore) {
     var showAddAccountDialog by remember { mutableStateOf(false) }
     var showSwitchAccountDialog by remember { mutableStateOf(false) }
 
+    LaunchedEffect(Unit) {
+        WatchService.loadPersistedSettings(context)
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -349,8 +353,10 @@ fun DashboardScreen(accountStore: AccountStore) {
                                                 answerOutcomes = batchResult.outcomes
                                                 checkTimeStr = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
                                                 
-                                                val successCount = answerOutcomes.count { it.success }
-                                                Toast.makeText(context, "签到处理完毕！成功 $successCount 个", Toast.LENGTH_LONG).show()
+                                                val successCount = answerOutcomes.count {
+                                                    it.action == "answered" || it.action == "already_answered"
+                                                }
+                                                Toast.makeText(context, "签到处理完毕！已完成 $successCount 个", Toast.LENGTH_LONG).show()
                                             } catch (e: Exception) {
                                                 Toast.makeText(context, "执行失败: ${e.message}", Toast.LENGTH_LONG).show()
                                             } finally {
@@ -444,7 +450,7 @@ fun DashboardScreen(accountStore: AccountStore) {
                                 Text("检测到签到时自动提交", color = Color.White, fontSize = 14.sp)
                                 Switch(
                                     checked = isAutoSubmitEnabled,
-                                    onCheckedChange = { WatchService.autoSubmit.value = it },
+                                    onCheckedChange = { WatchService.persistAutoSubmit(context, it) },
                                     colors = SwitchDefaults.colors(
                                         checkedThumbColor = ElectricBlue,
                                         checkedTrackColor = ElectricBlue.copy(alpha = 0.5f)
@@ -462,7 +468,7 @@ fun DashboardScreen(accountStore: AccountStore) {
                             )
                             Slider(
                                 value = watchIntervalMinutes.toFloat(),
-                                onValueChange = { WatchService.pollIntervalMinutes.value = it.toInt() },
+                                onValueChange = { WatchService.persistPollInterval(context, it.toInt()) },
                                 valueRange = 1f..15f,
                                 steps = 14,
                                 colors = SliderDefaults.colors(
@@ -471,7 +477,7 @@ fun DashboardScreen(accountStore: AccountStore) {
                                 )
                             )
                             Text(
-                                text = "* 守护进程会启用 WakeLock 及通知常驻以防止系统省电优化冻结应用。",
+                                text = "* 守护进程会启用 WakeLock 及通知常驻；强省电 ROM 仍建议设为后台无限制。",
                                 fontSize = 10.sp,
                                 color = Color(0xFF64748B)
                             )
@@ -700,8 +706,10 @@ fun RollcallItemView(rollcall: RollcallRecord, outcome: AnswerOutcome?) {
             // Outcome badge
             val (statusText, statusColor) = when {
                 rollcall.is_expired -> "已过期" to ExpiredGray
-                rollcall.rollcall_status == "on_call_fine" -> "已完成" to SuccessGreen
-                outcome != null && outcome.success -> "成功" to SuccessGreen
+                rollcall.isAnswered -> "已完成" to SuccessGreen
+                outcome?.action == "answered" -> "成功" to SuccessGreen
+                outcome?.action == "already_answered" -> "已完成" to SuccessGreen
+                outcome?.action == "detected" -> "待签" to SoftCyan
                 outcome != null && !outcome.success -> "失败" to ErrorRed
                 else -> "待签" to SoftCyan
             }
