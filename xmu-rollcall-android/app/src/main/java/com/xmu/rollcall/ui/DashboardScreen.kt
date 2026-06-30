@@ -2,7 +2,6 @@ package com.xmu.rollcall.ui
 
 import android.content.Context
 import android.content.Intent
-import android.os.Build
 import android.widget.Toast
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
@@ -426,11 +425,7 @@ fun DashboardScreen(accountStore: AccountStore) {
                                         val intent = Intent(context, WatchService::class.java).apply {
                                             action = if (start) WatchService.ACTION_START else WatchService.ACTION_STOP
                                         }
-                                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                                            context.startForegroundService(intent)
-                                        } else {
-                                            context.startService(intent)
-                                        }
+                                        context.startForegroundService(intent)
                                     },
                                     colors = SwitchDefaults.colors(
                                         checkedThumbColor = SuccessGreen,

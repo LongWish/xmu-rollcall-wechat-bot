@@ -3,7 +3,6 @@ package com.xmu.rollcall.service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.os.Build
 
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
@@ -18,11 +17,7 @@ class BootReceiver : BroadcastReceiver() {
             action = WatchService.ACTION_START
         }
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(serviceIntent)
-            } else {
-                context.startService(serviceIntent)
-            }
+            context.startForegroundService(serviceIntent)
         } catch (e: Exception) {
             // Some ROMs block foreground-service startup from boot broadcasts.
         }

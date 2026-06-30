@@ -25,7 +25,7 @@ data class RollcallRecord(
     val status: String
 ) {
     val isAnswered: Boolean
-        get() = status == "on_call_fine" || rollcall_status == "on_call_fine"
+        get() = status == "on_call_fine"
 
     val isActive: Boolean
         get() = !is_expired && !isAnswered

@@ -3,7 +3,6 @@ package com.xmu.rollcall.service
 import android.app.*
 import android.content.Context
 import android.content.Intent
-import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
@@ -37,6 +36,7 @@ class WatchService : Service() {
         private const val ALERT_CHANNEL_ID = "xmu_rollcall_alert_channel"
         private const val MIN_INTERVAL_MINUTES = 1
         private const val MAX_INTERVAL_MINUTES = 15
+        private const val WAKE_LOCK_TIMEOUT_MS = 20 * 60 * 1000L
 
         val isRunning = MutableStateFlow(false)
         val logs = MutableStateFlow<List<String>>(emptyList())
@@ -86,19 +86,13 @@ class WatchService : Service() {
         autoSubmit.value = settingsStore.getAutoSubmit()
         pollIntervalMinutes.value = settingsStore.getPollIntervalMinutes()
         createNotificationChannels()
-        
-        // Acquire wake lock to keep CPU running when screen is off
-        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "XmuRollcall::WatchWakeLock").apply {
-            acquire()
-        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> startWatching()
             ACTION_STOP -> stopWatching()
-            else -> if (settingsStore.getWatchEnabled()) startWatching()
+            else -> if (settingsStore.getWatchEnabled()) startWatching() else stopSelf()
         }
         return START_STICKY
     }
@@ -108,6 +102,7 @@ class WatchService : Service() {
         settingsStore.setWatchEnabled(true)
         isRunning.value = true
         addLog("后台守护已开启，开始自动扫描...")
+        refreshWakeLock()
 
         // Promote to foreground service
         startForeground(NOTIFICATION_ID, createForegroundNotification("准备进行第一次扫描..."))
@@ -115,6 +110,7 @@ class WatchService : Service() {
         // Start background polling
         pollJob = serviceScope.launch {
             while (isActive) {
+                refreshWakeLock()
                 try {
                     performScan()
                 } catch (e: CancellationException) {
@@ -124,6 +120,7 @@ class WatchService : Service() {
                     e.printStackTrace()
                 }
                 
+                refreshWakeLock()
                 delayUntilNextScan()
             }
         }
@@ -132,6 +129,7 @@ class WatchService : Service() {
     private fun stopWatching() {
         settingsStore.setWatchEnabled(false)
         if (!isRunning.value) {
+            releaseWakeLock()
             stopSelf()
             return
         }
@@ -139,6 +137,7 @@ class WatchService : Service() {
         addLog("后台守护已关闭。")
         pollJob?.cancel()
         pollJob = null
+        releaseWakeLock()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -252,6 +251,26 @@ class WatchService : Service() {
         }
     }
 
+    private fun refreshWakeLock() {
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        val currentWakeLock = wakeLock ?: powerManager
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "XmuRollcall::WatchWakeLock")
+            .apply { setReferenceCounted(false) }
+            .also { wakeLock = it }
+
+        if (currentWakeLock.isHeld) {
+            currentWakeLock.release()
+        }
+        currentWakeLock.acquire(WAKE_LOCK_TIMEOUT_MS)
+    }
+
+    private fun releaseWakeLock() {
+        wakeLock?.let {
+            if (it.isHeld) it.release()
+        }
+        wakeLock = null
+    }
+
     private fun createForegroundNotification(contentText: String): Notification {
         val pendingIntent = PendingIntent.getActivity(
             this, 0,
@@ -296,38 +315,34 @@ class WatchService : Service() {
     }
 
     private fun createNotificationChannels() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val watchChannel = NotificationChannel(
-                CHANNEL_ID,
-                "后台守护通知 (前台服务)",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "保持后台服务常驻运行的常驻通知"
-            }
-
-            val alertChannel = NotificationChannel(
-                ALERT_CHANNEL_ID,
-                "签到状态提醒",
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "签到成功、失败或检测到新签到时的警报提醒"
-                enableLights(true)
-                enableVibration(true)
-                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-            }
-
-            val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            notificationManager.createNotificationChannel(watchChannel)
-            notificationManager.createNotificationChannel(alertChannel)
+        val watchChannel = NotificationChannel(
+            CHANNEL_ID,
+            "后台守护通知 (前台服务)",
+            NotificationManager.IMPORTANCE_LOW
+        ).apply {
+            description = "保持后台服务常驻运行的常驻通知"
         }
+
+        val alertChannel = NotificationChannel(
+            ALERT_CHANNEL_ID,
+            "签到状态提醒",
+            NotificationManager.IMPORTANCE_HIGH
+        ).apply {
+            description = "签到成功、失败或检测到新签到时的警报提醒"
+            enableLights(true)
+            enableVibration(true)
+            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+        }
+
+        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        notificationManager.createNotificationChannel(watchChannel)
+        notificationManager.createNotificationChannel(alertChannel)
     }
 
     override fun onDestroy() {
         super.onDestroy()
         serviceJob.cancel()
-        wakeLock?.let {
-            if (it.isHeld) it.release()
-        }
+        releaseWakeLock()
         isRunning.value = false
     }
 
