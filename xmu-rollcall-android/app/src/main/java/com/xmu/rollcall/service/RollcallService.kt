@@ -148,14 +148,7 @@ class RollcallService(
             when {
                 rollcall.is_expired -> AnswerOutcome(rollcall, "expired", false, "签到已过期。")
                 rollcall.isAnswered -> AnswerOutcome(rollcall, "already_answered", true, "签到已完成。")
-                rollcall.is_number -> {
-                    val code = fetchNumberCode(rollcall)
-                    if (code != null) {
-                        AnswerOutcome(rollcall, "detected", false, "检测到数字签到码：$code", numberCode = code)
-                    } else {
-                        AnswerOutcome(rollcall, "detected", false, "检测到数字签到，但未获取到签到码。")
-                    }
-                }
+                rollcall.is_number -> AnswerOutcome(rollcall, "detected", false, "检测到数字签到，执行签到时再获取签到码。")
                 rollcall.is_radar -> AnswerOutcome(rollcall, "detected", false, "检测到雷达签到，需一键自动应答。")
                 else -> AnswerOutcome(rollcall, "detected", false, "二维码或暂不支持的签到类型。")
             }
@@ -269,9 +262,9 @@ class RollcallService(
                     lastStatus = response.code
                     if (response.code == 200) {
                         return if (confirmRollcallAnswered(rollcall.rollcall_id)) {
-                            AnswerOutcome(rollcall, "answered", true, "雷达签到成功（探测点直达）。", latitude = lat, longitude = lon, responseStatus = 200)
+                            AnswerOutcome(rollcall, "answered", true, "雷达签到成功（提交坐标已通过）。", latitude = lat, longitude = lon, responseStatus = 200)
                         } else {
-                            AnswerOutcome(rollcall, "pending_confirmation", false, "提交接口返回 200，但复查未确认完成，请手动核对。", latitude = lat, longitude = lon, responseStatus = 200)
+                            AnswerOutcome(rollcall, "pending_confirmation", false, "提交接口返回 200，但复查未确认完成，请手动核对。", responseStatus = 200)
                         }
                     }
                     val bodyString = response.body?.string() ?: ""
@@ -315,7 +308,7 @@ class RollcallService(
                         return if (confirmRollcallAnswered(rollcall.rollcall_id)) {
                             AnswerOutcome(rollcall, "answered", true, "雷达定位签到成功。", latitude = lat, longitude = lon, responseStatus = 200)
                         } else {
-                            AnswerOutcome(rollcall, "pending_confirmation", false, "提交接口返回 200，但复查未确认完成，请手动核对。", latitude = lat, longitude = lon, responseStatus = 200)
+                            AnswerOutcome(rollcall, "pending_confirmation", false, "提交接口返回 200，但复查未确认完成，请手动核对。", responseStatus = 200)
                         }
                     }
                 }

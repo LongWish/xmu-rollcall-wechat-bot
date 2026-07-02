@@ -289,8 +289,10 @@ fun DashboardScreen(accountStore: AccountStore) {
                                                         service.inspectActiveRollcalls()
                                                     } catch (e: Exception) {
                                                         // retry login once
+                                                        WatchService.addLog("会话可能已过期或查询失败，正在重新登录后重试查询...")
                                                         if (client.loginTronClass(activeAccount!!.username, activeAccount!!.password)) {
                                                             accountStore.updateCookies(activeAccount!!.username, client.getSerializedCookies())
+                                                            WatchService.addLog("重新登录成功，已更新本地会话。")
                                                             val retryService = RollcallService(client, activeAccount!!.username)
                                                             retryService.inspectActiveRollcalls()
                                                         } else {
@@ -300,6 +302,9 @@ fun DashboardScreen(accountStore: AccountStore) {
                                                 }
                                                 activeRollcalls = batchResult.rollcalls
                                                 answerOutcomes = batchResult.outcomes
+                                                accountStore.updateCookies(activeAccount!!.username, client.getSerializedCookies())
+                                                accountsList = accountStore.getAccounts()
+                                                activeAccount = accountStore.getActiveAccount()
                                                 checkTimeStr = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
                                                 Toast.makeText(context, "查询成功，发现 ${activeRollcalls.size} 个签到", Toast.LENGTH_SHORT).show()
                                             } catch (e: Exception) {
@@ -339,8 +344,10 @@ fun DashboardScreen(accountStore: AccountStore) {
                                                     try {
                                                         service.answerActiveRollcalls()
                                                     } catch (e: Exception) {
+                                                        WatchService.addLog("会话可能已过期或提交失败，正在重新登录后重试签到...")
                                                         if (client.loginTronClass(activeAccount!!.username, activeAccount!!.password)) {
                                                             accountStore.updateCookies(activeAccount!!.username, client.getSerializedCookies())
+                                                            WatchService.addLog("重新登录成功，已更新本地会话。")
                                                             val retryService = RollcallService(client, activeAccount!!.username)
                                                             retryService.answerActiveRollcalls()
                                                         } else {
@@ -350,6 +357,9 @@ fun DashboardScreen(accountStore: AccountStore) {
                                                 }
                                                 activeRollcalls = batchResult.rollcalls
                                                 answerOutcomes = batchResult.outcomes
+                                                accountStore.updateCookies(activeAccount!!.username, client.getSerializedCookies())
+                                                accountsList = accountStore.getAccounts()
+                                                activeAccount = accountStore.getActiveAccount()
                                                 checkTimeStr = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
                                                 
                                                 val successCount = answerOutcomes.count {
@@ -728,7 +738,7 @@ fun RollcallItemView(rollcall: RollcallRecord, outcome: AnswerOutcome?) {
                     Text(
                         text = when {
                             outcome.numberCode != null -> "码:${outcome.numberCode}"
-                            outcome.latitude != null && outcome.longitude != null -> String.format(Locale.US, "%.3f,%.3f", outcome.latitude, outcome.longitude)
+                            outcome.latitude != null && outcome.longitude != null -> String.format(Locale.US, "%.4f,%.4f", outcome.latitude, outcome.longitude)
                             else -> outcome.message.take(12)
                         },
                         color = Color(0xFF94A3B8),

@@ -6,46 +6,115 @@ import okhttp3.*
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
-import java.io.IOException
-import java.net.CookieManager
-import java.net.CookiePolicy
+import java.net.Inet4Address
+import java.net.InetAddress
+import java.util.Locale
 import java.util.concurrent.TimeUnit
+
+private class Ipv4FirstDns(
+    private val ipv4FirstHosts: Set<String> = setOf("lnt.xmu.edu.cn")
+) : Dns {
+    override fun lookup(hostname: String): List<InetAddress> {
+        val addresses = Dns.SYSTEM.lookup(hostname)
+        val normalizedHost = hostname.lowercase(Locale.US)
+        if (normalizedHost !in ipv4FirstHosts) {
+            return addresses
+        }
+        return addresses.sortedBy { it !is Inet4Address }
+    }
+}
 
 class XmuLoginClient {
 
-    private val cookieManager = CookieManager().apply {
-        setCookiePolicy(CookiePolicy.ACCEPT_ALL)
-    }
+    private val storedCookies = mutableListOf<Cookie>()
 
     private val cookieJar = object : CookieJar {
         override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
-            // Save cookies to CookieManager
-            val cookieHeaders = cookies.map { it.toString() }
-            val headers = mapOf("Set-Cookie" to cookieHeaders)
-            try {
-                cookieManager.put(url.toUri(), headers)
-            } catch (e: IOException) {
-                e.printStackTrace()
+            synchronized(storedCookies) {
+                cookies.forEach { newCookie ->
+                    storedCookies.removeAll {
+                        it.name == newCookie.name && it.domain == newCookie.domain && it.path == newCookie.path
+                    }
+                    if (newCookie.expiresAt > System.currentTimeMillis()) {
+                        storedCookies.add(newCookie)
+                    }
+                }
             }
         }
 
         override fun loadForRequest(url: HttpUrl): List<Cookie> {
-            try {
-                val cookieMap = cookieManager.get(url.toUri(), emptyMap())
-                val cookieHeaders = cookieMap["Cookie"] ?: cookieMap["cookie"] ?: return emptyList()
-                return cookieHeaders.flatMap { header ->
-                    header.split(";").mapNotNull {
-                        Cookie.parse(url, it.trim())
-                    }
+            synchronized(storedCookies) {
+                val now = System.currentTimeMillis()
+                storedCookies.removeAll { it.expiresAt <= now }
+                return storedCookies.filter { it.matches(url) }
+            }
+        }
+    }
+
+    private fun storeCookie(cookie: Cookie) {
+        synchronized(storedCookies) {
+            storedCookies.removeAll {
+                it.name == cookie.name && it.domain == cookie.domain && it.path == cookie.path
+            }
+            if (cookie.expiresAt > System.currentTimeMillis()) {
+                storedCookies.add(cookie)
+            }
+        }
+    }
+
+    private fun parsePersistedCookie(url: HttpUrl, cookieString: String): List<Cookie> {
+        val trimmed = cookieString.trim()
+        if (trimmed.isEmpty()) return emptyList()
+
+        if (looksLikeCookieHeader(trimmed)) {
+            return trimmed.split(";").mapNotNull { part ->
+                Cookie.parse(url, part.trim())
+            }
+        }
+
+        return listOfNotNull(Cookie.parse(url, trimmed))
+    }
+
+    private fun looksLikeCookieHeader(cookieString: String): Boolean {
+        val parts = cookieString.split(";").map { it.trim() }.filter { it.isNotEmpty() }
+        if (parts.size <= 1) return false
+
+        val setCookieAttributes = setOf("path", "domain", "expires", "max-age", "secure", "httponly", "samesite")
+        return parts.drop(1).any { part ->
+            val key = part.substringBefore("=", part).lowercase()
+            part.contains("=") && key !in setCookieAttributes
+        }
+    }
+
+    private fun cookieStorageMap(): Map<String, List<String>> {
+        synchronized(storedCookies) {
+            val now = System.currentTimeMillis()
+            storedCookies.removeAll { it.expiresAt <= now }
+            return storedCookies
+                .groupBy { cookie -> "https://${cookie.domain.removePrefix(".")}" }
+                .mapValues { entry -> entry.value.map { it.toString() } }
+        }
+    }
+
+    private fun restoreCookieStorage(serializedCookies: Map<String, List<String>>) {
+        synchronized(storedCookies) {
+            storedCookies.clear()
+        }
+
+        for ((domain, cookies) in serializedCookies) {
+            val url = domain.toHttpUrlOrNull() ?: "https://${domain.removePrefix(".")}".toHttpUrlOrNull() ?: continue
+            for (cookieString in cookies) {
+                val parsedCookies = parsePersistedCookie(url, cookieString)
+                parsedCookies.forEach { cookie ->
+                    storeCookie(cookie)
                 }
-            } catch (e: IOException) {
-                return emptyList()
             }
         }
     }
 
     val okHttpClient: OkHttpClient = OkHttpClient.Builder()
         .cookieJar(cookieJar)
+        .dns(Ipv4FirstDns())
         .followRedirects(false)
         .followSslRedirects(false)
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -65,34 +134,23 @@ class XmuLoginClient {
      * Get all cookies as strings. Used to persist session.
      */
     fun getSerializedCookies(): Map<String, List<String>> {
-        val cookiesMap = mutableMapOf<String, List<String>>()
-        val domains = listOf("https://c-identity.xmu.edu.cn", "https://lnt.xmu.edu.cn")
-        for (domain in domains) {
-            val uri = java.net.URI.create(domain)
-            val headers = cookieManager.get(uri, emptyMap())
-            val cookieList = headers["Cookie"] ?: headers["cookie"]
-            if (cookieList != null) {
-                cookiesMap[domain] = cookieList
-            }
-        }
-        return cookiesMap
+        return cookieStorageMap()
     }
 
     /**
      * Restore cookies from persistent storage.
      */
     fun restoreCookies(serializedCookies: Map<String, List<String>>) {
-        for ((domain, cookies) in serializedCookies) {
-            val uri = java.net.URI.create(domain)
-            cookieManager.put(uri, mapOf("Set-Cookie" to cookies))
-        }
+        restoreCookieStorage(serializedCookies)
     }
 
     /**
      * Clears all session cookies
      */
     fun clearCookies() {
-        cookieManager.cookieStore.removeAll()
+        synchronized(storedCookies) {
+            storedCookies.clear()
+        }
     }
 
     /**

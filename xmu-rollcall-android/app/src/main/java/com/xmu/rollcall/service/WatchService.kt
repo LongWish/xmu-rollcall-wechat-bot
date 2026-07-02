@@ -187,6 +187,8 @@ class WatchService : Service() {
             }
         }
 
+        accountStore.updateCookies(activeAccount.username, loginClient.getSerializedCookies())
+
         val activeRollcalls = rollcalls.filter { it.isActive }
         addLog("发现 ${activeRollcalls.size} 个活动签到 (总共 ${rollcalls.size} 个)。")
         updateNotificationText("扫描完成，活动签到: ${activeRollcalls.size} 个")
