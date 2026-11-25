@@ -1,5 +1,7 @@
 # XMU 微信签到机器人
 
+## 由于API更新该程序已暂不可用，未来可能会不定期更新
+
 [使用效果图](docs/screenshot.jpg)
 
 ## Android 客户端
